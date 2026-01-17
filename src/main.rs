@@ -8,6 +8,7 @@ use axum::{
 use clap::Parser;
 use serde::Serialize;
 use std::{
+    borrow::Cow,
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, RwLock},
@@ -58,7 +59,7 @@ async fn counts(
     let num = counts.get(&key);
     Json(CountResponse {
         total: num.copied().unwrap_or_default(),
-        ip,
+        ip: ip.to_string(),
         path,
     })
 }
@@ -67,22 +68,15 @@ async fn health() -> &'static str {
     "OK"
 }
 
-fn get_addr(req: &Request, peer: &SocketAddr) -> String {
-    let peer_ip = peer.ip().to_string();
-
-    // If the server behind cloudflare then we will use Cloudflare IP header.
-    let Some(hdr) = req.headers().get("cf-connecting-ip") else {
-        return peer_ip;
-    };
-
-    if hdr.is_empty() {
-        return peer_ip;
+fn get_addr<'a>(req: &'a Request, peer: &SocketAddr) -> Cow<'a, str> {
+    if let Some(hdr) = req.headers().get("cf-connecting-ip") {
+        if let Ok(ip) = hdr.to_str() {
+            if !ip.is_empty() {
+                return Cow::Borrowed(ip);
+            }
+        }
     }
-
-    match hdr.to_str() {
-        Ok(ip) => ip.to_string(),
-        _ => peer_ip,
-    }
+    Cow::Owned(peer.ip().to_string())
 }
 
 #[derive(clap::Parser)]
