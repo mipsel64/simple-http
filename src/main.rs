@@ -96,6 +96,7 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/*path", get(counts))
+        .route("/", get(counts))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             count_middleware,
