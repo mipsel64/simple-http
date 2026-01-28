@@ -7,14 +7,49 @@ use axum::{
 };
 use clap::Parser;
 use serde::Serialize;
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Arc, RwLock},
-};
+use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
+use tokio::sync::RwLock;
 
-type RequestCounts = Arc<RwLock<HashMap<String, u64>>>;
+const DEFAULT_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60); // 15m
+
+#[derive(Clone, Copy)]
+struct Entry {
+    value: u64,
+    t0: std::time::Instant,
+}
+
+impl Default for Entry {
+    fn default() -> Self {
+        Self {
+            value: 0,
+            t0: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Entry {
+    fn inc(&mut self) {
+        if self.should_reset() {
+            self.reset();
+        }
+        self.value += 1;
+    }
+
+    fn get(&self) -> u64 {
+        self.value
+    }
+
+    fn reset(&mut self) {
+        self.value = 0;
+        self.t0 = std::time::Instant::now();
+    }
+
+    fn should_reset(&self) -> bool {
+        self.t0.elapsed() > DEFAULT_TTL
+    }
+}
+
+type RequestCounts = Arc<RwLock<HashMap<String, Entry>>>;
 
 #[derive(Clone)]
 struct AppState {
@@ -38,8 +73,9 @@ async fn count_middleware(
     let ip = get_addr(&req, &addr);
     let key = format!("{}:{}", ip, path);
     {
-        let mut counts = state.counts.write().unwrap();
-        *counts.entry(key).or_insert(0) += 1;
+        let mut counts = state.counts.write().await;
+        let mut entry = *counts.entry(key).or_default();
+        entry.inc();
     }
 
     next.run(req).await
@@ -50,15 +86,28 @@ async fn counts(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> impl IntoResponse {
-    let counts = state.counts.read().unwrap().clone();
+    let counts = state.counts.read().await;
 
     let path = req.uri().path().to_string();
     let ip = get_addr(&req, &addr);
     let key = format!("{}:{}", ip, path);
 
-    let num = counts.get(&key);
+    let mut entry = counts.get(&key).copied().unwrap_or_default();
+
+    if entry.should_reset() {
+        let counts = state.counts.clone();
+        tokio::spawn(async move {
+            let mut write = counts.write().await;
+            if let Some(entry) = write.get_mut(&key) {
+                entry.reset();
+            }
+        });
+        entry.reset();
+        entry.inc();
+    }
+
     Json(CountResponse {
-        total: num.copied().unwrap_or_default(),
+        total: entry.get(),
         ip: ip.to_string(),
         path,
     })
